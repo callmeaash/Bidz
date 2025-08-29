@@ -1,34 +1,44 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordRequestForm
-from typing import Annotated
-from models import User, Item, Bid, Comment, Wishlist, Report
+from typing import Annotated, List
+from models import User, Item, Bid, Comment, Watchlist, Report
 from database import init_db, SessionDep
 from sqlmodel import select
 from dotenv import load_dotenv
 import os
-from datetime import timedelta, timezone
+from datetime import timedelta, timezone, datetime
 from auth import create_access_token, get_current_user
-from schemas import Token, RegisterUser
-from utils import get_password_hash, verify_password, USERNAME_REGEX, PASSWORD_REGEX
+from schemas import Token, RegisterUser, ItemForm
+from utils import get_password_hash, verify_password, USERNAME_REGEX, PASSWORD_REGEX, NUMBER_REGEX, AUCTION_CATEGORIES
 import re
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from fastapi.staticfiles import StaticFiles
+import time
+
 
 load_dotenv()
 
 app = FastAPI()
 
 init_db()
-
+app.mount("/static", StaticFiles(directory="static"), name="static")
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 
 
-@app.get("/")
-def index():
-    return {"success": "This is index route"}
+# Image configurations
+ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"]
+MAX_IMAGE_SIZE = 5 * 1024 * 1024
+
+
+# Default item image path
+DEFAULT_ITEM_IMAGE = '/static/uploads/item.jpg'
 
 
 @app.post("/login", response_model=Token)
 def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], session: SessionDep):
+    """
+    Login into the auction app
+    """
     username = form_data.username
     password = form_data.password
 
@@ -61,7 +71,12 @@ def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], session: S
 
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register(form_data: RegisterUser, session: SessionDep):
+    """
+    Register a new user
+    """
+
     username = form_data.username.strip()
+    number = form_data.number.strip()
     password = form_data.password.strip()
     confirm_password = form_data.confirm_password.strip()
 
@@ -77,6 +92,12 @@ def register(form_data: RegisterUser, session: SessionDep):
             detail="Password must be at least 6 chars, including a number"
         )
     
+    if not re.match(NUMBER_REGEX, number):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Phone number"
+        )
+    
     if password != confirm_password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -84,15 +105,21 @@ def register(form_data: RegisterUser, session: SessionDep):
         )
 
     try:
-        new_user = User(username=username, password=get_password_hash(password))
+        new_user = User(username=username, number=number, password=get_password_hash(password))
         session.add(new_user)
         session.commit()
         session.refresh(new_user)
     except IntegrityError:
         session.rollback()
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Username already taken"
+        )
+    except SQLAlchemyError as e:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to register the user {e}"
         )
     
     return {
@@ -101,6 +128,109 @@ def register(form_data: RegisterUser, session: SessionDep):
     }
 
 
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+async def add_item(item_data: Annotated[ItemForm, Depends()], session: SessionDep, current_user: CurrentUserDep):
+    """
+    Add new item in the auction
+    """
+
+    # Validate the Items data received from the user
+    if len(item_data.title) < 3 or len(item_data.title) > 50:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Title must be 3-50 characters"
+        )
+    
+    if len(item_data.description) < 10:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Description must be at least 10 characters"
+        )
+    
+    if item_data.starting_bid <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Starting bid must be greater than 0"
+        )
+    
+    if item_data.days <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Auction duration must be at least 1 day"
+        )
+    
+    if item_data.category not in AUCTION_CATEGORIES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid item category"
+        )
+    
+    # If user provides the item image, validate the image
+    file_path = DEFAULT_ITEM_IMAGE
+    if item_data.image:
+        if item_data.image.content_type not in ALLOWED_IMAGE_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid image type. Allowed: {",".join(ALLOWED_IMAGE_TYPES)}"
+            )
+        contents = await item_data.image.read()
+
+        if len(contents) > MAX_IMAGE_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Image size must be less than {MAX_IMAGE_SIZE // (1024 * 1024)} MB"
+            )
+
+        # Save the product image in the server
+        file_path = f"static/uploads/{current_user.id}_{int(time.time())}.jpg"
+        with open(file_path, 'wb') as buffer:
+            buffer.write(contents)
+
+    new_item = Item(
+        owner_id=current_user.id,
+        title=item_data.title.title().strip(),
+        description=item_data.description.capitalize().strip(),
+        category=item_data.category,
+        image=file_path,
+        starting_bid=item_data.starting_bid,
+        end_at=datetime.now(timezone.utc) + timedelta(days=item_data.days)
+    )
+
+    try:
+        session.add(new_item)
+        session.commit()
+        session.refresh(new_item)
+    except SQLAlchemyError as e:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create the item {e}"
+        )
+
+    return new_item
+
+
+@app.get("/", response_model=List[Item])
+def list_items(session: SessionDep, search: str | None = Query(default=None)):
+    """
+    Returns the all the active items available for bidding.
+    Also allows to filter items by searching
+    """
+    query = select(Item).where(Item.is_active is True)
+    if search:
+        query = query.where(
+            (Item.title.ilike(f"%{search}%")) | (Item.description.ilike(f"%{search}%"))
+        )
+    items = session.exec(query).all()
+    return items
+
+
+@app.get("/categories")
+def categories():
+    """
+    Get all the categories available
+    """
+    return AUCTION_CATEGORIES
 
 
 @app.get("/protected")
