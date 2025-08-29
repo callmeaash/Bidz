@@ -1,7 +1,7 @@
 from sqlmodel import SQLModel, Field, Relationship
-from sqlalchemy import Column, DateTime, String, Boolean, ForeignKey, Enum, func
+from sqlalchemy import Column, DateTime, String, Boolean, ForeignKey, Enum, func, Float, PrimaryKeyConstraint
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 
 class User(SQLModel, table=True):
@@ -10,9 +10,10 @@ class User(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(sa_column=Column(String, unique=True, nullable=False))
     password: str
+    number: str
     avatar: str = Field(
-        default="https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_1280.png",
-        sa_column=Column(String, server_default="https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_1280.png", nullable=False)
+        default="/static/uploads/avatar.jpg",
+        sa_column=Column(String, server_default="/static/uploads/avatar.jpg", nullable=False)
     )
     is_admin: bool = Field(
         default=False,
@@ -27,8 +28,16 @@ class User(SQLModel, table=True):
         sa_column=Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     )
 
-    items: List["Item"] = Relationship(back_populates="owner")
-    wishlists: List["Wishlist"] = Relationship(back_populates="user")
+    owned_items: List["Item"] = Relationship(
+        back_populates="owner",
+        sa_relationship_kwargs={"foreign_keys": "Item.owner_id"}
+    )
+    won_items: List["Item"] = Relationship(
+        back_populates="winner",
+        sa_relationship_kwargs={"foreign_keys": "Item.winner_id"}
+    )
+     
+    watchlists: List["Watchlist"] = Relationship(back_populates="user")
 
     def __str__(self):
         return f"{self.username}"
@@ -42,23 +51,37 @@ class Item(SQLModel, table=True):
     title: str
     description: str
     image: str = Field(
-        default="https://png.pngtree.com/png-vector/20221125/ourmid/pngtree-no-image-available-icon-flatvector-illustration-picture-coming-creative-vector-png-image_40968940.jpg",
-        sa_column=Column(String, server_default="https://png.pngtree.com/png-vector/20221125/ourmid/pngtree-no-image-available-icon-flatvector-illustration-picture-coming-creative-vector-png-image_40968940.jpg", nullable=False)
+        sa_column=Column(String, server_default="/static/uploads/item.jpg", nullable=False)
     )
+    category: str
     starting_bid: float
-    current_bid: float
+    current_bid: Optional[float] = Field(
+        default=None,
+        sa_column=Column(Float, nullable=True)
+    )
     is_active: bool = Field(
         default=True,
         sa_column=Column(Boolean, server_default="true", nullable=False)
     )
-    winner: int | None = Field(default=None)
+    winner_id: int | None = Field(
+        default=None,
+        sa_column=Column(ForeignKey("users.id", ondelete='SET NULL'), nullable=True)
+    )
     end_at: datetime
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     )
 
-    owner: User = Relationship(back_populates="items")
+    owner: User = Relationship(
+        back_populates="owned_items",
+        sa_relationship_kwargs={"foreign_keys": "Item.owner_id"}
+    )
+    winner: User | None = Relationship(
+        back_populates="won_items",
+        sa_relationship_kwargs={"foreign_keys": "Item.winner_id"}
+    )
+    
     bids: List["Bid"] = Relationship(back_populates="item")
     comments: List["Comment"] = Relationship(back_populates="item")
 
@@ -96,13 +119,15 @@ class Comment(SQLModel, table=True):
     item: Item = Relationship(back_populates="comments")
 
 
-class Wishlist(SQLModel, table=True):
-    __tablename__ = "watchlists"
+class Watchlist(SQLModel, table=True):
+    __tablename__ = "wishlists"
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "item_id"),
+    )
 
-    id: int = Field(default=None, primary_key=True)
     user_id: int = Field(sa_column=Column(ForeignKey("users.id", ondelete='CASCADE')))
     item_id: int = Field(sa_column=Column(ForeignKey("items.id", ondelete='CASCADE')))
-    user: User = Relationship(back_populates="wishlists")
+    user: User = Relationship(back_populates="watchlists")
 
 
 class Report(SQLModel, table=True):
