@@ -2,6 +2,8 @@ from pydantic import BaseModel
 from typing import Optional
 from dataclasses import dataclass
 from fastapi import Form, UploadFile, File
+from datetime import datetime
+from typing import List
 
 
 class Token(BaseModel):
@@ -29,3 +31,48 @@ class ItemForm:
     days: int = Form(...)
     image: Optional[UploadFile] = File(None)
 
+
+class UserRead(BaseModel):
+    id: int
+    username: str
+    avatar: str
+
+    class Config:
+        from_attributes = True
+
+
+class CommentRead(BaseModel):
+    id: int
+    comment: str
+    created_at: datetime
+    user: UserRead
+
+    class Config:
+        from_attributes = True
+
+
+class BidRead(BaseModel):
+    id: int
+    bid: float
+    user: UserRead
+
+    class Config:
+        from_attributes = True
+
+
+class ItemRead(BaseModel):
+    id: int
+    owner_id: int
+    title: str
+    description: str
+    image: str
+    category: str
+    starting_bid: float
+    current_bid: Optional[float] = None
+    created_at: datetime
+    end_at: datetime
+    comments: List[CommentRead] = []
+    bids: List[BidRead] = []
+
+    class Config:
+        from_attributes = True
