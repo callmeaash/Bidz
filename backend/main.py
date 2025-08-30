@@ -8,14 +8,14 @@ from dotenv import load_dotenv
 import os
 from datetime import timedelta, timezone, datetime
 from auth import create_access_token, get_current_user, get_current_admin_user
-from schemas import Token, RegisterUser, ItemForm, ItemRead
+from schemas import Token, RegisterUser, ItemForm, ItemRead, CommentCreate, CommentRead, BidRead, BidCreate
 from utils import get_password_hash, verify_password, USERNAME_REGEX, PASSWORD_REGEX, NUMBER_REGEX, AUCTION_CATEGORIES, mark_ended_auctions
 import re
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi.staticfiles import StaticFiles
 import time
-
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
@@ -23,6 +23,19 @@ app = FastAPI()
 
 init_db()
 
+# Allow your frontend origin
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,       # can also use ["*"] for testing
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Marks the auction item is_active status to false once the end date reaches
 scheduler = BackgroundScheduler()
@@ -246,6 +259,91 @@ def get_item(item_id: int, session: SessionDep):
             detail="Item doesnot exist"
         )
     return item
+
+
+@app.post("/item/{item_id}/comment", response_model=CommentRead)
+def add_comment(item_id: int, comment_data: CommentCreate, session: SessionDep, current_user: CurrentUserDep):
+    """
+    Add a new comment to the item
+    """
+
+    if not comment_data.comment.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="comment cannot be all whitespaces"
+        )
+
+    try:
+        new_comment = Comment(
+            user_id=current_user.id,
+            item_id=item_id,
+            comment=comment_data.comment.strip()
+        )
+        session.add(new_comment)
+        session.commit()
+        session.refresh(new_comment)
+    except SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to add the comment"
+        )
+    return new_comment
+
+
+@app.post("/item/{item_id}/bid", response_model=BidRead)
+def add_bid(item_id: int, bid_data: BidCreate, session: SessionDep, current_user: CurrentUserDep):
+    """
+    Add a bid to the item
+    """
+
+    item = session.exec(select(Item).where(Item.id == item_id)).first()
+    if not item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Item not found"
+        )
+    
+    # Check if the user is bidding in his own item
+    if item.owner_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot bid on your own item"
+        )
+
+
+    if item.current_bid is None:
+        if bid_data.bid < item.starting_bid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Bid amount cannot be less than starting bid"
+            )
+    else:
+        if bid_data.bid < item.current_bid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Bid amount cannot be less than current bid"
+            )
+
+    try:
+        item.current_bid = bid_data.bid
+        session.add(item)
+        new_bid = Bid(
+            user_id=current_user.id,
+            item_id=item_id,
+            bid=bid_data.bid
+        )
+        session.add(new_bid)
+        session.commit()
+        session.refresh(new_bid)
+    except SQLAlchemyError:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to add the bid"
+        )
+    
+    return new_bid
 
 
 @app.get("/profile")
