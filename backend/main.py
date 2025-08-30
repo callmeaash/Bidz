@@ -7,11 +7,12 @@ from sqlmodel import select
 from dotenv import load_dotenv
 import os
 from datetime import timedelta, timezone, datetime
-from auth import create_access_token, get_current_user
-from schemas import Token, RegisterUser, ItemForm
-from utils import get_password_hash, verify_password, USERNAME_REGEX, PASSWORD_REGEX, NUMBER_REGEX, AUCTION_CATEGORIES
+from auth import create_access_token, get_current_user, get_current_admin_user
+from schemas import Token, RegisterUser, ItemForm, ItemRead
+from utils import get_password_hash, verify_password, USERNAME_REGEX, PASSWORD_REGEX, NUMBER_REGEX, AUCTION_CATEGORIES, mark_ended_auctions
 import re
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi.staticfiles import StaticFiles
 import time
 
@@ -21,9 +22,17 @@ load_dotenv()
 app = FastAPI()
 
 init_db()
+
+
+# Marks the auction item is_active status to false once the end date reaches
+scheduler = BackgroundScheduler()
+scheduler.add_job(mark_ended_auctions, "interval", minutes=1)
+scheduler.start()
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
-
+CurrentAdminDep = Annotated[User, Depends(get_current_admin_user)]
 
 # Image configurations
 ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"]
@@ -207,16 +216,16 @@ async def add_item(item_data: Annotated[ItemForm, Depends()], session: SessionDe
             detail=f"Failed to create the item {e}"
         )
 
-    return new_item
+    return {"success": "Item added successfully"}
 
 
 @app.get("/", response_model=List[Item])
-def list_items(session: SessionDep, search: str | None = Query(default=None)):
+def list_items(session: SessionDep, search: str | None = None):
     """
     Returns the all the active items available for bidding.
     Also allows to filter items by searching
     """
-    query = select(Item).where(Item.is_active is True)
+    query = select(Item).where(Item.is_active)
     if search:
         query = query.where(
             (Item.title.ilike(f"%{search}%")) | (Item.description.ilike(f"%{search}%"))
@@ -224,6 +233,24 @@ def list_items(session: SessionDep, search: str | None = Query(default=None)):
     items = session.exec(query).all()
     return items
 
+
+@app.get("/items/{item_id}", response_model=ItemRead)
+def get_item(item_id: int, session: SessionDep):
+    """
+    Returns a item details for given item id
+    """
+    item = session.exec(select(Item).where(Item.id == item_id)).first()
+    if not item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Item doesnot exist"
+        )
+    return item
+
+
+@app.get("/profile")
+def get_profile(current_user: CurrentUserDep):
+    ...
 
 @app.get("/categories")
 def categories():
@@ -235,4 +262,9 @@ def categories():
 
 @app.get("/protected")
 def check(current_user: CurrentUserDep):
-    return current_user
+    return {"Success": "You are user"}
+
+
+@app.get("/admins")
+def admins(current_user: CurrentAdminDep):
+    return {"Success": "You are admin"}
