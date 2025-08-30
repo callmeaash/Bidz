@@ -39,6 +39,9 @@ class User(SQLModel, table=True):
      
     watchlists: List["Watchlist"] = Relationship(back_populates="user")
 
+    comments: List["Comment"] = Relationship(back_populates="user")
+    bids: List["Bid"] = Relationship(back_populates="user")
+
     def __str__(self):
         return f"{self.username}"
 
@@ -102,6 +105,7 @@ class Bid(SQLModel, table=True):
     )
 
     item: Item = Relationship(back_populates='bids')
+    user: User = Relationship(back_populates="bids")
 
 
 class Comment(SQLModel, table=True):
@@ -117,6 +121,7 @@ class Comment(SQLModel, table=True):
     )
 
     item: Item = Relationship(back_populates="comments")
+    user: User = Relationship(back_populates="comments")
 
 
 class Watchlist(SQLModel, table=True):
