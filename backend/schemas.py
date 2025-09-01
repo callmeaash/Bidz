@@ -35,7 +35,6 @@ class ItemForm:
 class UserRead(BaseModel):
     id: int
     username: str
-    avatar: str
 
     class Config:
         from_attributes = True
@@ -73,6 +72,34 @@ class ItemRead(BaseModel):
     end_at: datetime
     comments: List[CommentRead] = []
     bids: List[BidRead] = []
+
+    class Config:
+        from_attributes = True
+
+
+class CommentCreate(BaseModel):
+    comment: str
+
+
+class BidCreate(BaseModel):
+    bid: float
+
+
+class UserBidRead(BaseModel):
+    bid: float
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ItemBidInfo(BaseModel):
+    id: int
+    title: str
+    image: str
+    category: str
+    current_bid: float
+    user_last_bid: UserBidRead
 
     class Config:
         from_attributes = True
