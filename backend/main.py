@@ -2,22 +2,24 @@ from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import Annotated, List
 from models import User, Item, Bid, Comment, Watchlist, Report
-from database import init_db, SessionDep
-from sqlmodel import select
+from database import init_db, SessionDep, engine
+from sqlmodel import select, Session, update
+from sqlalchemy import desc, func
 from dotenv import load_dotenv
 import os
 from datetime import timedelta, timezone, datetime
 from auth import create_access_token, get_current_user, get_current_admin_user
-from schemas import Token, RegisterUser, ItemForm, ItemRead, CommentCreate, CommentRead, BidRead, BidCreate
-from utils import get_password_hash, verify_password, USERNAME_REGEX, PASSWORD_REGEX, NUMBER_REGEX, AUCTION_CATEGORIES, mark_ended_auctions
+from schemas import Token, RegisterUser, ItemForm, ItemRead, CommentCreate, CommentRead, BidRead, BidCreate, ItemBidInfo, UserBidRead
+from utils import get_password_hash, verify_password, USERNAME_REGEX, PASSWORD_REGEX, NUMBER_REGEX, AUCTION_CATEGORIES
 import re
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi_utils.tasks import repeat_every
 from fastapi.staticfiles import StaticFiles
 import time
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
+
 
 app = FastAPI()
 
@@ -37,12 +39,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Marks the auction item is_active status to false once the end date reaches
-scheduler = BackgroundScheduler()
-scheduler.add_job(mark_ended_auctions, "interval", minutes=1)
-scheduler.start()
-
-
 app.mount("/static", StaticFiles(directory="static"), name="static")
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentAdminDep = Annotated[User, Depends(get_current_admin_user)]
@@ -54,6 +50,23 @@ MAX_IMAGE_SIZE = 5 * 1024 * 1024
 
 # Default item image path
 DEFAULT_ITEM_IMAGE = '/static/uploads/item.jpg'
+
+
+# Function that runs every 60 seconds to mark the is_active status to True if end date is crossed
+@app.on_event('startup')
+@repeat_every(seconds=60)
+def mark_ended_auctions():
+    """
+    Marks the is_active status of a product to true when the active time period of the auction ends
+    """
+    with Session(engine) as session:
+        stmt = (
+            update(Item)
+            .where(Item.end_at <= datetime.now(timezone.utc))
+            .values(is_active=False)
+        )
+        session.exec(stmt)
+        session.commit()
 
 
 @app.post("/login", response_model=Token)
@@ -311,7 +324,6 @@ def add_bid(item_id: int, bid_data: BidCreate, session: SessionDep, current_user
             detail="You cannot bid on your own item"
         )
 
-
     if item.current_bid is None:
         if bid_data.bid < item.starting_bid:
             raise HTTPException(
@@ -342,8 +354,59 @@ def add_bid(item_id: int, bid_data: BidCreate, session: SessionDep, current_user
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to add the bid"
         )
-    
+
     return new_bid
+
+
+@app.get("/my-bids", response_model=List[ItemBidInfo])
+def get_my_bids(session: SessionDep, current_user: CurrentUserDep):
+    """
+    List items the user has bid on with their last bid
+    """
+
+    # Subquery: latest bid timestamp per item for this user
+    subq = (
+        select(
+            Bid.item_id,
+            func.max(Bid.created_at).label("last_created_at")
+        )
+        .where(Bid.user_id == current_user.id)
+        .group_by(Bid.item_id)
+        .subquery()
+    )
+
+    # Main query: join Item + last Bid
+    query = (
+        select(Item, Bid)
+        .join(Bid, Bid.item_id == Item.id)
+        .join(
+            subq,
+            (subq.c.item_id == Bid.item_id) &
+            (subq.c.last_created_at == Bid.created_at)
+        )
+        .where(Bid.user_id == current_user.id)
+        .order_by(subq.c.last_created_at.desc())
+    )
+
+    results = session.exec(query).all()
+
+    return [
+        ItemBidInfo(
+            id=item.id,
+            title=item.title,
+            image=item.image,
+            category=item.category,
+            current_bid=item.current_bid,
+            user_last_bid=UserBidRead(bid=bid.bid, created_at=bid.created_at)
+        )
+        for item, bid in results
+    ]
+
+
+@app.get("/my-watchlists")
+def get_watchlists(session: SessionDep, current_user: CurrentUserDep):
+
+    return current_user.watchlists
 
 
 @app.get("/profile")
